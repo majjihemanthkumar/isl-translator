@@ -1,0 +1,13 @@
+{
+  "ABUSE": 0,
+  "AGREE": 1,
+  "ALOT": 2,
+  "WANT": 3,
+  "WATER": 4,
+  "WEAR": 5,
+  "WELCOME": 6,
+  "WHAT": 7,
+  "WHERE": 8,
+  "WHO": 9,
+  "WORRY": 10
+}

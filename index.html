@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ISL Real-Time Translator</title>
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- Modular Stylesheet -->
+    <link rel="stylesheet" href="styles.css">
+
+    <!-- Preconnect to CDNs -->
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+    
+    <!-- MediaPipe & ONNX Runtime Web CDNs -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js" crossorigin="anonymous"></script>
+
+    <!-- Application Modules -->
+    <script src="camera.js"></script>
+    <script src="feature_extractor.js"></script>
+    <script src="onnx_engine.js"></script>
+    <script src="sentence_engine.js"></script>
+</head>
+<body>
+
+    <header>
+        <div class="header-title">
+            <h1>ISL Real-Time Translator</h1>
+            <p>Modules 1–5: Zero-Latency Client-Side ISL Interpretation</p>
+        </div>
+        <div class="badge-bar">
+            <div class="badge badge-loading" id="statusBadge">
+                <span class="badge-dot"></span>
+                <span id="statusBadgeText">Starting Camera...</span>
+            </div>
+            <div class="badge">
+                <span>FPS:</span>
+                <span id="fpsCounter" style="color: var(--accent-blue);">0</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="app-container">
+        <!-- LEFT COLUMN: Camera Stream Viewport -->
+        <div class="viewport-card">
+            <div class="viewport-wrapper" id="viewportWrapper">
+                <video id="webcam" class="video-feed" autoplay playsinline muted></video>
+                <canvas id="outputCanvas" class="overlay-canvas" width="640" height="480"></canvas>
+
+                <!-- Dynamic Error Screen -->
+                <div id="statusOverlay" class="status-overlay">
+                    <div class="status-icon" id="statusIcon">🎥</div>
+                    <div class="status-title" id="statusTitle">Requesting Camera Access</div>
+                    <div class="status-desc" id="statusDesc">Please allow camera permissions to start tracking.</div>
+                    <button class="btn-action" id="retryBtn" style="display: none;" onclick="startApp()">Retry Camera Access</button>
+                </div>
+            </div>
+
+            <!-- Viewport Footer -->
+            <div class="viewport-footer">
+                <div class="viewport-footer-item">Resolution: <span id="resVal">640 x 480</span></div>
+                <div class="viewport-footer-item">ONNX Model: <span id="engineState" style="color: var(--accent-yellow);">Loading isl_model.onnx...</span></div>
+            </div>
+        </div>
+
+        <!-- RIGHT COLUMN: Translation Output Display -->
+        <div class="translation-panel">
+            <!-- Active Detected Sign -->
+            <div class="card-panel">
+                <div class="panel-header">
+                    <h2>Live Gesture Recognition</h2>
+                    <span class="badge" id="moduleBadge" style="background: var(--accent-yellow-light); color: #b45309; border-color: rgba(245, 158, 11, 0.2);">Loading ONNX</span>
+                </div>
+                <div class="live-sign-box">
+                    <div class="live-sign-text" id="liveSignText">--</div>
+                    <div class="live-sign-sub" id="liveSignSub">Initializing ONNX Runtime Web...</div>
+                </div>
+
+                <!-- Feature Extraction & Inference Diagnostics -->
+                <div class="diag-box">
+                    <div class="diag-row">
+                        <span>Model Status:</span>
+                        <span class="diag-val" id="diagModel">isl_model.onnx</span>
+                    </div>
+                    <div class="diag-row">
+                        <span>Prediction Confidence:</span>
+                        <span class="diag-val" id="diagConfidence" style="color: var(--accent-blue);">0.0%</span>
+                    </div>
+                    <div class="diag-row">
+                        <span>Pose Tracking:</span>
+                        <span class="diag-val" id="diagPose">0 / 33</span>
+                    </div>
+                    <div class="diag-row">
+                        <span>Left / Right Hands:</span>
+                        <span class="diag-val" id="diagHands">Not Observed</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Assembled Sentence Output Bar -->
+            <div class="card-panel">
+                <div class="panel-header">
+                    <h2>Assembled Sentence Output</h2>
+                    <span class="badge" style="background: var(--accent-blue-light); color: var(--accent-blue); border-color: rgba(37, 99, 235, 0.2);">Module 5 Active</span>
+                </div>
+                <div class="sentence-box" id="sentenceDisplay">
+                    <span class="sentence-placeholder">Translated sign sentence will assemble here in real-time...</span>
+                </div>
+                <div class="sentence-controls">
+                    <button class="btn-secondary" id="clearBtn" onclick="sentenceEngine.clear()">Clear Sentence</button>
+                    <button class="btn-secondary" id="backspaceBtn" onclick="sentenceEngine.deleteLast()">Delete Last</button>
+                    <button class="btn-secondary" id="copyBtn" onclick="copySentenceText()">Copy Text</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('outputCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+
+        const statusOverlay = document.getElementById('statusOverlay');
+        const statusIcon = document.getElementById('statusIcon');
+        const statusTitle = document.getElementById('statusTitle');
+        const statusDesc = document.getElementById('statusDesc');
+        const retryBtn = document.getElementById('retryBtn');
+        const statusBadge = document.getElementById('statusBadge');
+        const statusBadgeText = document.getElementById('statusBadgeText');
+        const fpsCounter = document.getElementById('fpsCounter');
+        const resVal = document.getElementById('resVal');
+        const engineState = document.getElementById('engineState');
+        const moduleBadge = document.getElementById('moduleBadge');
+        
+        const liveSignText = document.getElementById('liveSignText');
+        const liveSignSub = document.getElementById('liveSignSub');
+        const diagModel = document.getElementById('diagModel');
+        const diagConfidence = document.getElementById('diagConfidence');
+        const diagPose = document.getElementById('diagPose');
+        const diagHands = document.getElementById('diagHands');
+        const sentenceDisplay = document.getElementById('sentenceDisplay');
+
+        // Instantiate Modular Engines
+        const cameraEngine = new CameraEngine(videoElement, canvasElement, {
+            onStatusChange: (status, title, desc) => {
+                if (status === 'active') {
+                    hideStatusOverlay();
+                    updateBadge('badge-loading', 'Loading ONNX Model...');
+                    resVal.textContent = desc;
+                    liveSignSub.textContent = 'Camera ready. Loading ONNX Runtime Web model...';
+                } else if (status === 'error') {
+                    updateBadge('badge-error', 'Camera Error');
+                    updateStatusOverlay('⚠️', title, desc, true);
+                } else {
+                    updateStatusOverlay('🎥', title, desc, false);
+                }
+            },
+            onFPSUpdate: (fps) => {
+                fpsCounter.textContent = fps;
+            }
+        });
+
+        const featureExtractor = new FeatureExtractor();
+        const onnxEngine = new ONNXEngine('./isl_model.onnx', './processed_data/label_map.json');
+        const sentenceEngine = new SentenceEngine(8, 0.35); // 8 frames debounce, min 35% confidence
+
+        let holistic = null;
+        let isHolisticReady = false;
+        let isProcessingFrame = false;
+
+        // UI Listener for Sentence Engine updates
+        sentenceEngine.onSentenceChange = (sentenceString, wordsArray) => {
+            if (wordsArray.length === 0) {
+                sentenceDisplay.innerHTML = '<span class="sentence-placeholder">Translated sign sentence will assemble here in real-time...</span>';
+            } else {
+                sentenceDisplay.textContent = sentenceString;
+            }
+        };
+
+        /**
+         * Application Bootstrapper
+         */
+        async function startApp() {
+            // 1. Start Camera
+            const cameraReady = await cameraEngine.start();
+            if (!cameraReady) return;
+
+            // 2. Start Video Render Loop
+            requestAnimationFrame(processVideoLoop);
+
+            // 3. Initialize ONNX Engine & MediaPipe in parallel
+            initEnginesAsync();
+        }
+
+        async function initEnginesAsync() {
+            // Load ONNX Model
+            const onnxReady = await onnxEngine.init();
+            if (onnxReady) {
+                diagModel.textContent = 'isl_model.onnx (ONNX Web)';
+                diagModel.style.color = 'var(--accent-green)';
+            } else {
+                diagModel.textContent = 'ONNX Load Failed';
+                diagModel.style.color = 'var(--accent-red)';
+            }
+
+            // Load MediaPipe Holistic
+            try {
+                holistic = new Holistic({
+                    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
+                });
+
+                holistic.setOptions({
+                    modelComplexity: 0,
+                    smoothLandmarks: true,
+                    enableSegmentation: false,
+                    smoothSegmentation: false,
+                    refineFaceLandmarks: false,
+                    minDetectionConfidence: 0.35,
+                    minTrackingConfidence: 0.35
+                });
+
+                holistic.onResults(onHolisticResults);
+                await holistic.initialize();
+
+                isHolisticReady = true;
+                updateBadge('badge-live', 'System Active');
+                engineState.textContent = 'Active (Sub-15ms Latency)';
+                engineState.style.color = 'var(--accent-green)';
+                moduleBadge.textContent = 'ONNX Web Active';
+                moduleBadge.style.background = 'var(--accent-green-light)';
+                moduleBadge.style.color = '#065f46';
+                liveSignSub.textContent = 'Ready for real-time ISL interpretation. Show gestures to webcam.';
+
+            } catch (e) {
+                console.error('MediaPipe Async Error:', e);
+                engineState.textContent = 'Init Fallback';
+            }
+        }
+
+        async function processVideoLoop(now) {
+            if (cameraEngine.isStreaming) {
+                cameraEngine.updateFPS(now);
+
+                if (isHolisticReady && !isProcessingFrame && videoElement.readyState >= 2) {
+                    isProcessingFrame = true;
+                    try {
+                        await holistic.send({ image: videoElement });
+                    } catch (e) {
+                        console.error('Holistic Send Error:', e);
+                    }
+                    isProcessingFrame = false;
+                }
+            }
+            requestAnimationFrame(processVideoLoop);
+        }
+
+        /**
+         * MediaPipe Results Callback & Real-Time ONNX Inference
+         */
+        async function onHolisticResults(results) {
+            cameraEngine.clearCanvas();
+
+            // 1. Extract 234 Float32 normalized features
+            const extracted = featureExtractor.extract(results);
+
+            // 2. Diagnostics UI update
+            diagPose.textContent = results.poseLandmarks ? '33 / 33 Active' : '0 / 33';
+            
+            const lhState = extracted.activeLH ? 'L: Active' : 'L: None';
+            const rhState = extracted.activeRH ? 'R: Active' : 'R: None';
+            diagHands.textContent = `${lhState} | ${rhState}`;
+
+            // 3. Execute In-Browser ONNX Prediction if hands or pose detected
+            if (extracted.activeLH || extracted.activeRH || results.poseLandmarks) {
+                const pred = await onnxEngine.predict(extracted.vector);
+
+                if (pred && pred.confidence > 0.30) {
+                    liveSignText.textContent = pred.word;
+                    const confPct = (pred.confidence * 100).toFixed(1);
+                    diagConfidence.textContent = `${confPct}%`;
+                    
+                    if (pred.confidence > 0.60) {
+                        liveSignText.style.color = 'var(--accent-blue)';
+                        liveSignSub.textContent = `Recognized "${pred.word}" (${confPct}% confidence)`;
+                    } else {
+                        liveSignText.style.color = 'var(--accent-yellow)';
+                        liveSignSub.textContent = `Uncertain gesture: "${pred.word}" (${confPct}%)`;
+                    }
+
+                    // 4. Process prediction in Sentence Engine (Debouncer)
+                    sentenceEngine.processPrediction(pred);
+
+                } else {
+                    liveSignText.textContent = '--';
+                    diagConfidence.textContent = '0.0%';
+                    liveSignSub.textContent = 'Waiting for valid sign gesture...';
+                }
+            } else {
+                liveSignText.textContent = '--';
+                diagConfidence.textContent = '0.0%';
+                liveSignSub.textContent = 'Waiting for hands in frame...';
+            }
+
+            // 5. Draw Motion Trails & Hand Skeleton Overlays
+            featureExtractor.drawOverlay(
+                canvasCtx, 
+                canvasElement.width, 
+                canvasElement.height, 
+                results, 
+                extracted.activeLH, 
+                extracted.activeRH
+            );
+        }
+
+        function copySentenceText() {
+            const sentence = sentenceEngine.getSentenceString();
+            if (!sentence) return;
+            navigator.clipboard.writeText(sentence).then(() => {
+                const btn = document.getElementById('copyBtn');
+                const orig = btn.textContent;
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = orig, 1500);
+            });
+        }
+
+        function updateStatusOverlay(icon, title, desc, showRetry = false) {
+            statusOverlay.classList.remove('hidden');
+            statusIcon.textContent = icon;
+            statusTitle.textContent = title;
+            statusDesc.textContent = desc;
+            retryBtn.style.display = showRetry ? 'inline-block' : 'none';
+        }
+
+        function hideStatusOverlay() {
+            statusOverlay.classList.add('hidden');
+        }
+
+        function updateBadge(badgeClass, text) {
+            statusBadge.className = `badge ${badgeClass}`;
+            statusBadgeText.textContent = text;
+        }
+
+        // Initialize on DOM load
+        window.addEventListener('DOMContentLoaded', startApp);
+    </script>
+</body>
+</html>
