@@ -1,177 +1,210 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>ISL Real-Time Translator</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background-color: #0f172a;
-      color: #f8fafc;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 20px;
-    }
+"""
+ISL Real-Time Translator - Local Server
+Serves static assets with correct MIME types for WebAssembly & ONNX,
+and provides a local Python ONNX inference fallback endpoint (/api/predict)
+using the local isl_model.onnx model.
+"""
 
-    h1 {
-      font-size: 1.8rem;
-      margin-bottom: 20px;
-      letter-spacing: -0.02em;
-      color: #38bdf8;
-    }
+import sys
+import os
+import json
+import mimetypes
+from http.server import HTTPServer, SimpleHTTPRequestHandler
 
-    .container {
-      position: relative;
-      width: 100%;
-      max-width: 640px;
-      border-radius: 16px;
-      overflow: hidden;
-      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
-      border: 1px solid #1e293b;
-      background-color: #000;
-    }
+# Register proper MIME types for WASM, JavaScript, and ML model binary assets
+mimetypes.add_type('application/javascript', '.js')
+mimetypes.add_type('application/wasm', '.wasm')
+mimetypes.add_type('application/octet-stream', '.onnx')
+mimetypes.add_type('application/octet-stream', '.tflite')
+mimetypes.add_type('application/octet-stream', '.data')
+mimetypes.add_type('application/x-protobuf', '.binarypb')
 
-    video {
-      width: 100%;
-      height: auto;
-      display: block;
-      transform: scaleX(-1); /* Mirror camera stream */
-    }
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, 'isl_model.onnx')
+LABEL_MAP_PATH = os.path.join(BASE_DIR, 'processed_data', 'label_map.json')
 
-    canvas { display: none; }
+ort_session = None
+id_to_word = {}
+input_name = 'float_input'
+last_model_mtime = 0
 
-    .hud-overlay {
-      position: absolute;
-      top: 16px;
-      left: 16px;
-      background: rgba(15, 23, 42, 0.85);
-      backdrop-filter: blur(8px);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      padding: 12px 20px;
-      border-radius: 12px;
-      min-width: 240px;
-    }
+try:
+    import numpy as np
+    import onnxruntime as ort
+except ImportError:
+    np = None
+    ort = None
 
-    .sign-title {
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: #94a3b8;
-    }
+def get_ort_session():
+    """Lazily load or reload model and label map if updated on disk."""
+    global ort_session, id_to_word, input_name, last_model_mtime
 
-    .sign-word {
-      font-size: 1.8rem;
-      font-weight: 800;
-      color: #22c55e;
-      margin: 2px 0;
-    }
+    if ort is None:
+        return None
 
-    .confidence-meter {
-      font-size: 0.85rem;
-      color: #cbd5e1;
-    }
+    try:
+        if not os.path.exists(MODEL_PATH) or not os.path.exists(LABEL_MAP_PATH):
+            return ort_session
 
-    .status-badge {
-      position: absolute;
-      bottom: 16px;
-      right: 16px;
-      padding: 6px 12px;
-      border-radius: 20px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      background: #1e293b;
-      color: #94a3b8;
-    }
+        cur_mtime = os.path.getmtime(MODEL_PATH)
+        if ort_session is None or cur_mtime != last_model_mtime:
+            with open(LABEL_MAP_PATH, 'r', encoding='utf-8') as f:
+                lmap = json.load(f)
+            id_to_word = {int(v): k for k, v in lmap.items()}
 
-    .status-active {
-      background: rgba(34, 197, 94, 0.2);
-      color: #4ade80;
-      border: 1px solid rgba(34, 197, 94, 0.3);
-    }
-  </style>
-</head>
-<body>
+            ort_session = ort.InferenceSession(MODEL_PATH)
+            input_name = ort_session.get_inputs()[0].name
+            last_model_mtime = cur_mtime
+            print(f"[OK] Loaded updated isl_model.onnx ({len(id_to_word)} classes, input: '{input_name}')")
+    except Exception as e:
+        print(f"[WARN] Error updating ONNX session: {e}")
 
-  <h1>🤟 Indian Sign Language Translator</h1>
+    return ort_session
 
-  <div class="container">
-    <video id="webcam" autoplay playsinline muted></video>
-    <canvas id="canvas"></canvas>
 
-    <div class="hud-overlay">
-      <div class="sign-title">Detected Sign</div>
-      <div id="signWord" class="sign-word">Waiting...</div>
-      <div id="confidence" class="confidence-meter">Confidence: --</div>
-    </div>
+class ISLRequestHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=BASE_DIR, **kwargs)
 
-    <div id="statusBadge" class="status-badge">Connecting...</div>
-  </div>
+    def end_headers(self):
+        # Enable CORS and disable caching for reliable local reloading
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        super().end_headers()
 
-  <script>
-    const video = document.getElementById('webcam');
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
-    const signWord = document.getElementById('signWord');
-    const confidenceEl = document.getElementById('confidence');
-    const statusBadge = document.getElementById('statusBadge');
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
 
-    // Setup WebSocket connection
-    const ws = new WebSocket(`ws://${window.location.host}/ws/translate`);
+    def do_GET(self):
+        if self.path == '/favicon.ico':
+            self.send_response(204)
+            self.end_headers()
+            return
 
-    ws.onopen = () => {
-      statusBadge.textContent = "● LIVE SYSTEM ACTIVE";
-      statusBadge.classList.add("status-active");
-      startStreaming();
-    };
+        if self.path == '/api/status':
+            session = get_ort_session()
+            status_data = {
+                'status': 'online',
+                'model': 'isl_model.onnx',
+                'python_ort_ready': session is not None,
+                'classes': len(id_to_word)
+            }
+            body = json.dumps(status_data).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      
-      if (data.status === "detected") {
-        signWord.textContent = data.word;
-        signWord.style.color = data.confidence > 50 ? "#22c55e" : "#f97316";
-        confidenceEl.textContent = `Confidence: ${data.confidence}%`;
-      } else {
-        signWord.textContent = "Waiting...";
-        signWord.style.color = "#94a3b8";
-        confidenceEl.textContent = "Confidence: --";
-      }
-    };
+        super().do_GET()
 
-    ws.onclose = () => {
-      statusBadge.textContent = "Disconnected";
-      statusBadge.classList.remove("status-active");
-    };
+    def do_POST(self):
+        if self.path == '/api/predict':
+            session = get_ort_session()
+            if session is None:
+                err_resp = json.dumps({'error': 'Local Python ONNX engine unavailable'}).encode('utf-8')
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(err_resp)))
+                self.end_headers()
+                self.wfile.write(err_resp)
+                return
 
-    // Request Webcam Stream
-    navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
-      .then(stream => {
-        video.srcObject = stream;
-      })
-      .catch(err => {
-        console.error("Camera access denied:", err);
-        alert("Webcam access is required for real-time translation.");
-      });
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length)
+                data = json.loads(body.decode('utf-8'))
+                features = data.get('features', [])
 
-    // Capture & send frames over WebSocket (~20 FPS)
-    function startStreaming() {
-      setInterval(() => {
-        if (video.readyState === video.HAVE_ENOUGH_DATA && ws.readyState === WebSocket.OPEN) {
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          
-          // Export JPEG frame base64 string
-          const base64Image = canvas.toDataURL('image/jpeg', 0.6);
-          ws.send(base64Image);
-        }
-      }, 50); // 50ms interval = ~20 FPS
-    }
-  </script>
-</body>
-</html>
+                if len(features) != 234:
+                    features = (features + [0.0] * 234)[:234]
+
+                # Hand Activity Gate: If left hand and right hand (indices 99 to 224) are all 0.0,
+                # the user is in an idle resting state. Do NOT classify noise into random words!
+                has_hand_activity = any(abs(f) > 1e-4 for f in features[99:225])
+                if not has_hand_activity:
+                    idle_resp = json.dumps({
+                        'word': '--',
+                        'confidence': 0.0,
+                        'classId': -1,
+                        'source': 'idle'
+                    }).encode('utf-8')
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(idle_resp)))
+                    self.end_headers()
+                    self.wfile.write(idle_resp)
+                    return
+
+                features_np = np.array([features], dtype=np.float32)
+                outputs = session.run(None, {input_name: features_np})
+
+                class_id = int(outputs[0][0])
+                probs = outputs[1][0] if len(outputs) > 1 else []
+                conf = float(probs[class_id]) if len(probs) > class_id else 0.90
+                word = id_to_word.get(class_id, f"Class {class_id}")
+
+                res_obj = {
+                    'word': word,
+                    'confidence': min(max(conf, 0.01), 0.999),
+                    'classId': class_id,
+                    'source': 'python_local_onnx'
+                }
+                res_bytes = json.dumps(res_obj).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(res_bytes)))
+                self.end_headers()
+                self.wfile.write(res_bytes)
+                return
+
+            except Exception as e:
+                err_resp = json.dumps({'error': str(e)}).encode('utf-8')
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(err_resp)))
+                self.end_headers()
+                self.wfile.write(err_resp)
+                return
+
+        self.send_response(404)
+        self.end_headers()
+
+
+def run(port=8000):
+    server_address = ('', port)
+    attempts = 0
+    httpd = None
+    while attempts < 10:
+        try:
+            httpd = HTTPServer(server_address, ISLRequestHandler)
+            break
+        except OSError:
+            print(f"[INFO] Port {port} is busy. Trying port {port + 1}...")
+            port = port + 1
+            server_address = ('', port)
+            attempts += 1
+
+    if not httpd:
+        print("[ERROR] Could not bind to an available port.")
+        sys.exit(1)
+
+    print("=" * 60)
+    print(f"  ISL Real-Time Translator Local Server")
+    print(f"  Serving at: http://localhost:{port}")
+    print(f"  Using local model: {MODEL_PATH}")
+    print("=" * 60)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down server...")
+        httpd.server_close()
+
+
+if __name__ == '__main__':
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    run(port)
