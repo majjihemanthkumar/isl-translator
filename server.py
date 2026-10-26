@@ -9,6 +9,8 @@ import sys
 import os
 import json
 import mimetypes
+import urllib.request
+import urllib.error
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
 # Register proper MIME types for WASM, JavaScript, and ML model binary assets
@@ -23,10 +25,99 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'isl_model.onnx')
 LABEL_MAP_PATH = os.path.join(BASE_DIR, 'processed_data', 'label_map.json')
 
+# Simple .env loader without external dependencies
+def load_env():
+    env_path = os.path.join(BASE_DIR, '.env')
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        k, v = line.split('=', 1)
+                        os.environ[k.strip()] = v.strip().strip('"\'')
+        except Exception as e:
+            print(f"[WARN] Failed to read .env: {e}")
+
+load_env()
+
 ort_session = None
 id_to_word = {}
 input_name = 'float_input'
 last_model_mtime = 0
+
+def translate_sign_sentence(sentence, api_key=None, model=None):
+    """
+    Translates raw ISL sign glosses (e.g. 'WORRY ALOT WATER')
+    into a natural, fluent English sentence using Groq LLM.
+    """
+    key = api_key or os.environ.get('GROQ_API_KEY')
+    if not key:
+        return {'error': 'No Groq API key configured. Please set GROQ_API_KEY or provide in request.'}
+
+    target_model = model or os.environ.get('GROQ_MODEL', 'qwen/qwen3.8-27b')
+    url = 'https://api.groq.com/openai/v1/chat/completions'
+
+    system_prompt = (
+        "You are an expert Indian Sign Language (ISL) interpreter. "
+        "You receive a sequence of recognized ISL sign keywords/glosses. "
+        "Convert them into a single, natural, fluent, and grammatically complete English sentence representing the intended meaning in everyday conversation. "
+        "Example: 'WORRY ALOT WATER' -> \"Don't worry, there is plenty of water.\" "
+        "Example: 'WANT WATER' -> \"I would like some water.\" "
+        "Example: 'WHERE WATER' -> \"Where can I find water?\" "
+        "Example: 'WHO WEAR' -> \"Who is wearing that?\" "
+        "Output ONLY the single final English sentence with no quotation marks, labels, markdown, or explanation."
+    )
+
+    candidate_models = [target_model, 'qwen/qwen3.8-27b', 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-20b']
+    seen = set()
+    candidate_models = [m for m in candidate_models if not (m in seen or seen.add(m))]
+
+    last_error = None
+    for cand in candidate_models:
+        payload = {
+            'model': cand,
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': sentence}
+            ],
+            'temperature': 0.2,
+            'max_tokens': 80
+        }
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers={
+                'Authorization': f'Bearer {key}',
+                'Content-Type': 'application/json',
+                'User-Agent': 'ISL-Translator/1.0'
+            }
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                translated = data['choices'][0]['message']['content'].strip()
+                if (translated.startswith('"') and translated.endswith('"')) or (translated.startswith("'") and translated.endswith("'")):
+                    translated = translated[1:-1].strip()
+                return {
+                    'success': True,
+                    'raw': sentence,
+                    'translation': translated,
+                    'model': cand
+                }
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode('utf-8', errors='ignore')
+            last_error = f"HTTP {e.code}: {err_body}"
+            if e.code == 404:
+                continue
+            break
+        except Exception as e:
+            last_error = str(e)
+            break
+
+    return {'error': last_error or 'Failed to generate AI translation'}
 
 try:
     import numpy as np
@@ -90,7 +181,8 @@ class ISLRequestHandler(SimpleHTTPRequestHandler):
                 'status': 'online',
                 'model': 'isl_model.onnx',
                 'python_ort_ready': session is not None,
-                'classes': len(id_to_word)
+                'classes': len(id_to_word),
+                'ai_ready': bool(os.environ.get('GROQ_API_KEY'))
             }
             body = json.dumps(status_data).encode('utf-8')
             self.send_response(200)
@@ -103,6 +195,42 @@ class ISLRequestHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
+        if self.path == '/api/ai-translate':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length)
+                data = json.loads(body.decode('utf-8'))
+                raw_sentence = data.get('sentence', '').strip()
+                api_key = data.get('apiKey', None)
+                model = data.get('model', None)
+
+                if not raw_sentence:
+                    res_bytes = json.dumps({'error': 'Empty sentence provided'}).encode('utf-8')
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(res_bytes)))
+                    self.end_headers()
+                    self.wfile.write(res_bytes)
+                    return
+
+                result = translate_sign_sentence(raw_sentence, api_key=api_key, model=model)
+                status_code = 200 if result.get('success') else 500
+                res_bytes = json.dumps(result).encode('utf-8')
+                self.send_response(status_code)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(res_bytes)))
+                self.end_headers()
+                self.wfile.write(res_bytes)
+                return
+            except Exception as e:
+                err_resp = json.dumps({'error': str(e)}).encode('utf-8')
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(err_resp)))
+                self.end_headers()
+                self.wfile.write(err_resp)
+                return
+
         if self.path == '/api/predict':
             session = get_ort_session()
             if session is None:

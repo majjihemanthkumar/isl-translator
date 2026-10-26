@@ -1,0 +1,114 @@
+================================================================================
+           INDIAN SIGN LANGUAGE (ISL) REAL-TIME TRANSLATOR
+                     TECH STACK & TECHNOLOGIES USED
+================================================================================
+
+1. SYSTEM ARCHITECTURE OVERVIEW
+--------------------------------------------------------------------------------
+The project is a zero-latency, client-side real-time Indian Sign Language (ISL) 
+recognition and translation application with an optional Python desktop interface
+and local server fallback. It combines computer vision, in-browser machine learning 
+inference (WebAssembly/ONNX), and cloud LLM grammar refinement.
+
+
+2. FRONTEND TECHNOLOGIES
+--------------------------------------------------------------------------------
+- Markup & Structure:
+  * HTML5 (Semantic markup, accessible layout, responsive viewport)
+  * HTML5 <canvas> API (Hardware-accelerated 2D overlay rendering, landmark 
+    connectors, and hand motion trailing)
+  * HTML5 <video> API (Real-time webcam video stream integration)
+
+- Styling & Design:
+  * Vanilla CSS3 (Custom design system without heavy frameworks)
+  * CSS Custom Properties (CSS variables for dark-mode palette and themes)
+  * Glassmorphism & Micro-interactions (CSS backdrop filters, smooth transitions)
+  * Flexbox & CSS Grid (Responsive dual-column layout)
+  * Typography: Google Fonts ('Inter' and 'JetBrains Mono')
+
+- Core Logic:
+  * Vanilla JavaScript (ES6+ Object-Oriented Architecture)
+  * Modular design split into clean single-responsibility components:
+    - camera.js (Camera stream capture & FPS monitor)
+    - feature_extractor.js (234-feature extraction & landmark normalization)
+    - onnx_engine.js (Client-side ONNX Runtime Web inference loader)
+    - sentence_engine.js (Debounced consecutive-frame word accumulation)
+    - ai_translator.js (LLM translation orchestrator & UI binding)
+  * Web APIs:
+    - navigator.mediaDevices.getUserMedia (Camera access)
+    - Web Storage API (localStorage for API key persistence)
+    - Fetch API (Async loading of model weights and label maps)
+    - Web Speech API (speechSynthesis for text-to-speech feedback)
+
+
+3. CLIENT-SIDE COMPUTER VISION & INFERENCE
+--------------------------------------------------------------------------------
+- MediaPipe Holistic (@mediapipe/holistic via jsDelivr CDN):
+  * Real-time body pose, face mesh, and dual-hand tracking directly in the browser
+  * 543 total landmarks analyzed per video frame
+- ONNX Runtime Web (onnxruntime-web via jsDelivr CDN):
+  * In-browser machine learning model execution
+  * WebAssembly (WASM) execution backend for low-latency client-side prediction
+  * Eliminates constant server round-trips for frame inference
+
+
+4. MACHINE LEARNING & DATA PIPELINE (PYTHON)
+--------------------------------------------------------------------------------
+- Scikit-Learn (sklearn):
+  * Model: ExtraTreesClassifier (Extremely Randomized Trees Ensemble)
+  * Preprocessing: StandardScaler (Z-score feature standardization)
+  * Pipeline: sklearn.pipeline.Pipeline (Bundles Scaler + Classifier)
+  * Validation & Metrics: StratifiedKFold, accuracy_score, classification_report,
+    confusion_matrix
+- ONNX & Model Export:
+  * skl2onnx: Converts Scikit-Learn pipelines to ONNX format (opset 12)
+  * ZipMap disabled (zipmap=False) for direct Float32 probability tensor output
+  * onnx: ONNX model format loading, validation, and inspection
+- Feature Engineering (234-dimensional feature vector):
+  * Pose relative normalization centered at shoulder midpoint and scaled by shoulder width
+  * Left & right hand normalized coordinates relative to wrists and hand span
+  * Hand-to-nose relative position tracking
+- Scientific Computing & Data Handling:
+  * NumPy (numpy): High-performance vector/matrix math and array storage (.npy)
+  * Joblib: Serialization for trained Scikit-Learn models and scalers (.pkl)
+  * Pillow (PIL): Image dataset manipulation and dataset duplication/augmentation
+
+
+5. DESKTOP APPLICATION & LOCAL BACKEND
+--------------------------------------------------------------------------------
+- Desktop Live Testing:
+  * OpenCV (opencv-python / cv2): Desktop webcam capture, image processing, 
+    annotated HUD rendering
+  * MediaPipe Python: Native Python holistic tracking for local testing
+  * ONNX Runtime (onnxruntime): Local CPU-based model execution
+- Local Web & API Server:
+  * Python 3 Standard Library (http.server.HTTPServer, SimpleHTTPRequestHandler)
+  * Custom MIME type registration for WebAssembly (.wasm) and ONNX (.onnx)
+  * REST API Endpoints:
+    - POST /api/predict: Server-side Python ONNX inference fallback
+    - POST /api/translate: Server-side LLM translation proxy
+    - GET /api/health: Service and model status inspection
+
+
+6. AI & NATURAL LANGUAGE PROCESSING (LLM)
+--------------------------------------------------------------------------------
+- Cloud Provider: Groq Cloud API (https://api.groq.com)
+- Models Supported:
+  * Qwen 2.5 / Qwen 3.8 (e.g., qwen/qwen3.8-27b)
+  * Meta LLaMA 3.3 (llama-3.3-70b-versatile, llama-3.1-8b-instant)
+  * OpenAI open-source models (openai/gpt-oss-20b)
+- Task: ISL Gloss Sequence to Natural English Translation
+  * Converts discrete recognized glosses (e.g. "WORRY ALOT WATER") into fluent,
+    grammatically complete sentences (e.g. "Don't worry, there is plenty of water.")
+
+
+7. DEPLOYMENT & UTILITIES
+--------------------------------------------------------------------------------
+- Operating System: Windows
+- Shell & Automation Scripts:
+  * run.bat (Automated launcher detecting Python/Node.js and launching the browser)
+  * run_desktop.bat (Direct OpenCV desktop interface launcher)
+  * PowerShell integration for delayed browser launching
+- Fallback Server: Node.js / npx http-server (Supported in run.bat)
+- Version Control: Git (.gitignore configured for datasets, checkpoints, and models)
+================================================================================

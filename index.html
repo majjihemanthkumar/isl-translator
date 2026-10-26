@@ -25,6 +25,7 @@
     <script src="feature_extractor.js"></script>
     <script src="onnx_engine.js"></script>
     <script src="sentence_engine.js"></script>
+    <script src="ai_translator.js"></script>
 </head>
 <body>
 
@@ -102,19 +103,42 @@
                 </div>
             </div>
 
-            <!-- Assembled Sentence Output Bar -->
-            <div class="card-panel">
+            <!-- Module 5 & 6: Sentence Assembly & AI Expected Sentence Output -->
+            <div class="card-panel ai-card">
                 <div class="panel-header">
-                    <h2>Assembled Sentence Output</h2>
-                    <span class="badge" style="background: var(--accent-blue-light); color: var(--accent-blue); border-color: rgba(37, 99, 235, 0.2);">Module 5 Active</span>
+                    <h2>AI Natural Sentence Output (Expected)</h2>
+                    <span class="badge" id="aiStatusBadge" style="background: rgba(99, 102, 241, 0.1); color: #4f46e5; border-color: rgba(99, 102, 241, 0.25);">✨ Groq AI Active</span>
                 </div>
-                <div class="sentence-box" id="sentenceDisplay">
-                    <span class="sentence-placeholder">Translated sign sentence will assemble here in real-time...</span>
+                
+                <!-- Fluent AI Sentence Box -->
+                <div class="ai-sentence-box" id="aiSentenceBox">
+                    <div class="ai-sentence-text" id="aiSentenceDisplay">
+                        <span class="ai-sentence-placeholder">AI will formulate a natural, grammatically correct English sentence here...</span>
+                    </div>
+                    <div class="ai-status-bar">
+                        <span id="aiStatusSub" class="ai-badge-shimmer">Ready for signs</span>
+                        <span id="aiModelTag">Model: qwen/qwen3.8-27b</span>
+                    </div>
                 </div>
-                <div class="sentence-controls">
-                    <button class="btn-secondary" id="clearBtn" onclick="sentenceEngine.clear()">Clear Sentence</button>
+
+                <!-- Raw Recognized Sign Words (ISL Glosses) -->
+                <div style="margin-bottom: 0.4rem; display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);">
+                        Recognized Sign Glosses (<span id="rawWordCount">0</span>)
+                    </span>
+                    <button style="background: none; border: none; color: #6366f1; font-size: 0.75rem; font-weight: 600; cursor: pointer; text-decoration: underline;" onclick="openAiModal()">⚙️ AI Settings</button>
+                </div>
+                <div class="raw-signs-box" id="rawSignsDisplay">
+                    <span class="sentence-placeholder" style="font-size: 0.85rem;">Detected sign keywords will assemble here (e.g. WORRY ALOT WATER)...</span>
+                </div>
+
+                <!-- Interactive Sentence Action Bar -->
+                <div class="sentence-controls" style="flex-wrap: wrap;">
+                    <button class="btn-ai-sparkle" id="refineAiBtn" onclick="triggerManualAiRefine()">✨ Refine with AI</button>
+                    <button class="btn-speak" id="speakBtn" onclick="speakAiSentence()">🔊 Speak</button>
+                    <button class="btn-secondary" id="copyAiBtn" onclick="copyAiSentenceText()">📋 Copy AI Text</button>
                     <button class="btn-secondary" id="backspaceBtn" onclick="sentenceEngine.deleteLast()">Delete Last</button>
-                    <button class="btn-secondary" id="copyBtn" onclick="copySentenceText()">Copy Text</button>
+                    <button class="btn-secondary" id="clearBtn" onclick="clearAllSentences()">Clear All</button>
                 </div>
             </div>
         </div>
@@ -144,7 +168,16 @@
         const diagConfidence = document.getElementById('diagConfidence');
         const diagPose = document.getElementById('diagPose');
         const diagHands = document.getElementById('diagHands');
-        const sentenceDisplay = document.getElementById('sentenceDisplay');
+        const rawSignsDisplay = document.getElementById('rawSignsDisplay');
+        const rawWordCount = document.getElementById('rawWordCount');
+        const aiSentenceDisplay = document.getElementById('aiSentenceDisplay');
+        const aiStatusSub = document.getElementById('aiStatusSub');
+        const aiStatusBadge = document.getElementById('aiStatusBadge');
+        const aiModelTag = document.getElementById('aiModelTag');
+        const aiSettingsModal = document.getElementById('aiSettingsModal');
+        const groqApiKeyInput = document.getElementById('groqApiKeyInput');
+        const groqModelInput = document.getElementById('groqModelInput');
+        const autoTranslateToggle = document.getElementById('autoTranslateToggle');
 
         // Instantiate Modular Engines
         const cameraEngine = new CameraEngine(videoElement, canvasElement, {
@@ -170,17 +203,54 @@
         const onnxEngine = new ONNXEngine('./isl_model.onnx', './processed_data/label_map.json');
         const sentenceEngine = new SentenceEngine(8, 0.35); // 8 frames debounce, min 35% confidence
 
+        // Instantiate Module 6: AI Sentence Refiner
+        const aiTranslator = new AITranslator({
+            onStateChange: (state) => {
+                if (state.status === 'pending') {
+                    aiStatusSub.className = 'ai-badge-shimmer';
+                    aiStatusSub.textContent = state.message;
+                } else if (state.status === 'translating') {
+                    aiStatusSub.className = 'ai-badge-shimmer';
+                    aiStatusSub.textContent = '✨ Formulating natural English sentence...';
+                    aiSentenceDisplay.style.opacity = '0.6';
+                } else {
+                    aiStatusSub.className = '';
+                    aiStatusSub.textContent = state.message || 'Ready for signs';
+                }
+            },
+            onSuccess: (data) => {
+                aiSentenceDisplay.style.opacity = '1';
+                aiSentenceDisplay.textContent = `"${data.translation}"`;
+                aiStatusSub.className = '';
+                aiStatusSub.innerHTML = '<span style="color: var(--accent-green); font-weight: 600;">✓ Natural sentence formulated</span>';
+                aiModelTag.textContent = `Model: ${data.model}`;
+            },
+            onError: (msg) => {
+                aiSentenceDisplay.style.opacity = '1';
+                aiStatusSub.className = '';
+                aiStatusSub.innerHTML = `<span style="color: var(--accent-red);">⚠️ Error: ${msg}</span>`;
+            },
+            onClear: () => {
+                aiSentenceDisplay.style.opacity = '1';
+                aiSentenceDisplay.innerHTML = '<span class="ai-sentence-placeholder">AI will formulate a natural, grammatically correct English sentence here...</span>';
+                aiStatusSub.className = 'ai-badge-shimmer';
+                aiStatusSub.textContent = 'Ready for signs';
+            }
+        });
+
         let holistic = null;
         let isHolisticReady = false;
         let isProcessingFrame = false;
 
-        // UI Listener for Sentence Engine updates
+        // UI Listener for Sentence Engine updates: updates chips and triggers AI debounce
         sentenceEngine.onSentenceChange = (sentenceString, wordsArray) => {
+            rawWordCount.textContent = wordsArray.length;
             if (wordsArray.length === 0) {
-                sentenceDisplay.innerHTML = '<span class="sentence-placeholder">Translated sign sentence will assemble here in real-time...</span>';
+                rawSignsDisplay.innerHTML = '<span class="sentence-placeholder" style="font-size: 0.85rem;">Detected sign keywords will assemble here (e.g. WORRY ALOT WATER)...</span>';
             } else {
-                sentenceDisplay.textContent = sentenceString;
+                rawSignsDisplay.innerHTML = wordsArray.map(w => `<span class="sign-chip">${w}</span>`).join('');
             }
+            aiTranslator.handleSentenceUpdate(sentenceString, wordsArray);
         };
 
         /**
@@ -318,15 +388,63 @@
             );
         }
 
-        function copySentenceText() {
-            const sentence = sentenceEngine.getSentenceString();
-            if (!sentence) return;
-            navigator.clipboard.writeText(sentence).then(() => {
-                const btn = document.getElementById('copyBtn');
+        function triggerManualAiRefine() {
+            const raw = sentenceEngine.getSentenceString();
+            if (!raw) {
+                alert('Please perform sign gestures first to assemble words before refining.');
+                return;
+            }
+            aiTranslator.translate(raw);
+        }
+
+        function speakAiSentence() {
+            aiTranslator.speak();
+        }
+
+        function copyAiSentenceText() {
+            const text = aiTranslator.lastTranslation || sentenceEngine.getSentenceString();
+            if (!text) return;
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = document.getElementById('copyAiBtn');
                 const orig = btn.textContent;
                 btn.textContent = 'Copied!';
                 setTimeout(() => btn.textContent = orig, 1500);
             });
+        }
+
+        function clearAllSentences() {
+            sentenceEngine.clear();
+            aiTranslator.clearTimers();
+            aiTranslator.lastRawSentence = '';
+            aiTranslator.lastTranslation = '';
+            aiSentenceDisplay.innerHTML = '<span class="ai-sentence-placeholder">AI will formulate a natural, grammatically correct English sentence here...</span>';
+            aiStatusSub.className = 'ai-badge-shimmer';
+            aiStatusSub.textContent = 'Ready for signs';
+        }
+
+        function openAiModal() {
+            groqApiKeyInput.value = aiTranslator.getApiKey();
+            groqModelInput.value = aiTranslator.model;
+            autoTranslateToggle.checked = aiTranslator.autoTranslate;
+            aiSettingsModal.classList.remove('hidden');
+        }
+
+        function closeAiModal() {
+            aiSettingsModal.classList.add('hidden');
+        }
+
+        function saveAiSettings() {
+            const newKey = groqApiKeyInput.value.trim();
+            if (newKey) {
+                aiTranslator.setApiKey(newKey);
+            }
+            const newModel = groqModelInput.value.trim();
+            if (newModel) {
+                aiTranslator.model = newModel;
+                aiModelTag.textContent = `Model: ${newModel}`;
+            }
+            aiTranslator.toggleAutoTranslate(autoTranslateToggle.checked);
+            closeAiModal();
         }
 
         function updateStatusOverlay(icon, title, desc, showRetry = false) {
@@ -349,5 +467,37 @@
         // Initialize on DOM load
         window.addEventListener('DOMContentLoaded', startApp);
     </script>
+
+    <!-- AI Settings Modal -->
+    <div id="aiSettingsModal" class="modal-overlay hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>⚙️ AI Translation Settings</h3>
+                <button class="modal-close-btn" onclick="closeAiModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="groqApiKeyInput">Groq API Key</label>
+                    <input type="password" id="groqApiKeyInput" placeholder="gsk_..." class="form-input">
+                    <span class="form-hint">Stored securely in your local browser and backend .env</span>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="autoTranslateToggle" checked>
+                        <span>Auto-translate after pausing signing (1.5s delay)</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label for="groqModelInput">Groq Model</label>
+                    <input type="text" id="groqModelInput" value="qwen/qwen3.8-27b" class="form-input">
+                    <span class="form-hint">Recommended: qwen/qwen3.8-27b, llama-3.3-70b-versatile, or llama-3.1-8b-instant</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closeAiModal()">Cancel</button>
+                <button class="btn-action" onclick="saveAiSettings()">Save Settings</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
